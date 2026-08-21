@@ -31,7 +31,7 @@ jobs:
           grep -n "void AP_OSD_MSP_DisplayPort::flush" libraries/AP_OSD/AP_OSD_MSP_DisplayPort.cpp
           grep -n "msp_process_out_osd_config" libraries/AP_MSP/AP_MSP_Telem_Backend.cpp
 
-      - name: Patch Z40 Betaflight RC slots
+      - name: Patch Z40 Betaflight Slot0 zoom
         shell: bash
         run: |
           set -euxo pipefail
@@ -41,10 +41,10 @@ jobs:
 
           # Z40 manual / Betaflight example:
           #   set osd_rcchannels = 7,8,9,10
-          # These four rows correspond to physical CH8, CH9, CH10, CH11.
-          # Caddx PC Tool is configured for Zoom control = CH9, so ONLY the
-          # second row must follow physical CH9. All other slots are held LOW
-          # (-1000) so no reset/camera-change command can be triggered by S1.
+          # This means Slot0=CH8, Slot1=CH9, Slot2=CH10, Slot3=CH11.
+          # Z40 manual assigns Zoom Master Control to Slot0.
+          # Physical S1 is RC9 in ArduPilot, but for the VTX we intentionally
+          # present that RC9 value in the CH8/Slot0 row. Other slots stay LOW.
 
           backend = Path('libraries/AP_MSP/AP_MSP_Telem_Backend.cpp')
           s = backend.read_text()
@@ -65,7 +65,7 @@ jobs:
 
           old_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
 
-          new_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n#if AP_RC_CHANNEL_ENABLED\n    // Betaflight-compatible OSD RC slots for Z40.\n    // Rows represent CH8, CH9, CH10, CH11 exactly as:\n    //   set osd_rcchannels = 7,8,9,10\n    // Only the CH9 row follows physical CH9/S1. Others stay at -1000.\n    RC_Channels *rc_channels = RC_Channels::get_singleton();\n    if (rc_channels != nullptr) {\n        uint16_t pwm[16] {};\n        const uint8_t count = rc_channels->get_radio_in(pwm, 16);\n\n        int32_t zoom_value = -1000;\n        const uint8_t ch9_index = 8; // zero-based physical CH9\n        if (count > ch9_index) {\n            int32_t in = pwm[ch9_index];\n            if (in < 1000) {\n                in = 1000;\n            } else if (in > 2000) {\n                in = 2000;\n            }\n            zoom_value = (in - 1500) * 2;\n        }\n\n        const int32_t slot_value[4] = { -1000, zoom_value, -1000, -1000 };\n        for (uint8_t slot = 0; slot < 4; slot++) {\n            char text[6];\n            snprintf(text, sizeof(text), "%5ld", (long)slot_value[slot]);\n            _displayport->msp_displayport_write_string(25, 15 + slot, false, text);\n        }\n    }\n#endif\n\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
+          new_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n#if AP_RC_CHANNEL_ENABLED\n    // Betaflight-compatible Z40 RC slots.\n    // Rows are CH8/Slot0, CH9/Slot1, CH10/Slot2, CH11/Slot3.\n    // Z40 manual: Slot0 is Zoom Master Control.\n    // Feed physical ArduPilot RC9/S1 into Slot0 and hold all other slots LOW.\n    RC_Channels *rc_channels = RC_Channels::get_singleton();\n    if (rc_channels != nullptr) {\n        uint16_t pwm[16] {};\n        const uint8_t count = rc_channels->get_radio_in(pwm, 16);\n\n        int32_t zoom_value = -1000;\n        const uint8_t physical_rc9_index = 8; // zero-based physical RC9/S1\n        if (count > physical_rc9_index) {\n            int32_t in = pwm[physical_rc9_index];\n            if (in < 1000) {\n                in = 1000;\n            } else if (in > 2000) {\n                in = 2000;\n            }\n            zoom_value = (in - 1500) * 2;\n        }\n\n        const int32_t slot_value[4] = { zoom_value, -1000, -1000, -1000 };\n        for (uint8_t slot = 0; slot < 4; slot++) {\n            char text[6];\n            snprintf(text, sizeof(text), "%5ld", (long)slot_value[slot]);\n            _displayport->msp_displayport_write_string(25, 15 + slot, false, text);\n        }\n    }\n#endif\n\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
 
           if old_flush not in s:
               raise SystemExit('DisplayPort flush patch point not found')
@@ -96,9 +96,9 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p out
-          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_CH9_ONLY.apj
+          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_SLOT0_CH8.apj
           if [ -f ardupilot/build/speedybeef4v4/bin/arducopter.bin ]; then
-            cp ardupilot/build/speedybeef4v4/bin/arducopter.bin out/ArduCopter_240b5085_speedybeef4v4_Z40_CH9_ONLY.bin
+            cp ardupilot/build/speedybeef4v4/bin/arducopter.bin out/ArduCopter_240b5085_speedybeef4v4_Z40_SLOT0_CH8.bin
           fi
           sha256sum out/* > out/SHA256SUMS.txt
           ls -lah out
@@ -106,6 +106,6 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: speedybeef4v4-z40-ch9-only
+          name: speedybeef4v4-z40-slot0-ch8
           path: out/
           if-no-files-found: error
