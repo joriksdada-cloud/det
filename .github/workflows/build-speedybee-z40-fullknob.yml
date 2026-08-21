@@ -1,0 +1,94 @@
+name: Build SpeedyBee F405 V4 Z40 Full Knob
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-speedybee-z40-fullknob.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout ArduPilot exact commit
+        uses: actions/checkout@v4
+        with:
+          repository: ArduPilot/ardupilot
+          ref: 240b5085037c129ebbf8bdc52425356a9bec0d12
+          path: ardupilot
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify source and board target
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd ardupilot
+          test "$(git rev-parse HEAD)" = "240b5085037c129ebbf8bdc52425356a9bec0d12"
+          test -f libraries/AP_HAL_ChibiOS/hwdef/speedybeef4v4/hwdef.dat
+          grep -n "send only 4 channels" libraries/AP_MSP/AP_MSP_Telem_Backend.cpp
+
+      - name: Patch MSP RC CH1-CH16 and stretch CH9 over Z40 active range
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd ardupilot
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('libraries/AP_MSP/AP_MSP_Telem_Backend.cpp')
+          s = p.read_text()
+
+          old = '''MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)\n{\n    float roll = rc().get_roll_channel().norm_input_dz();\n    float pitch = -rc().get_pitch_channel().norm_input_dz();\n    float yaw = rc().get_yaw_channel().norm_input_dz();\n    float throttle = rc().get_throttle_channel().norm_input_dz();\n\n    const struct PACKED {\n        uint16_t a;\n        uint16_t e;\n        uint16_t r;\n        uint16_t t;\n    } rc {\n        // send only 4 channels, MSP order is AERT\n        a : uint16_t(roll*500+1500),       // A\n        e : uint16_t(pitch*500+1500),      // E\n        r : uint16_t(yaw*500+1500),        // R\n        t : uint16_t(throttle*1000+1000)    // T\n    };\n\n    sbuf_write_data(dst, &rc, sizeof(rc));\n    return MSP_RESULT_ACK;\n}\n'''
+
+          new = '''MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)\n{\n    float roll = rc().get_roll_channel().norm_input_dz();\n    float pitch = -rc().get_pitch_channel().norm_input_dz();\n    float yaw = rc().get_yaw_channel().norm_input_dz();\n    float throttle = rc().get_throttle_channel().norm_input_dz();\n\n    // Carry CH1-CH16 over MSP_RC. Keep CH1-CH4 exactly in ArduPilot AERT order.\n    uint16_t channels[16] {};\n    uint8_t channel_count = rc().get_radio_in(channels, 16);\n\n    channels[0] = uint16_t(roll*500+1500);\n    channels[1] = uint16_t(pitch*500+1500);\n    channels[2] = uint16_t(yaw*500+1500);\n    channels[3] = uint16_t(throttle*1000+1000);\n\n    if (channel_count < 4) {\n        channel_count = 4;\n    }\n\n    // Z40 workaround for this setup:\n    // the camera currently changes zoom only for MSP CH9 values ~1500..2000.\n    // Stretch the full physical S1/RC9 travel (~1000..2000) across that active range.\n    // 1000 -> 1500, 1500 -> 1750, 2000 -> 2000.\n    if (channel_count > 8) {\n        uint16_t ch9 = channels[8];\n        if (ch9 < 1000) {\n            ch9 = 1000;\n        } else if (ch9 > 2000) {\n            ch9 = 2000;\n        }\n        channels[8] = uint16_t(1500U + ((ch9 - 1000U) / 2U));\n    }\n\n    sbuf_write_data(dst, channels, channel_count * sizeof(channels[0]));\n    return MSP_RESULT_ACK;\n}\n'''
+
+          if old not in s:
+              raise SystemExit('Expected MSP_RC function was not found; refusing to patch unexpected source')
+
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          git diff --check
+          git diff -- libraries/AP_MSP/AP_MSP_Telem_Backend.cpp
+          ! grep -q "send only 4 channels" libraries/AP_MSP/AP_MSP_Telem_Backend.cpp
+
+      - name: Install ArduPilot build prerequisites
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd ardupilot
+          Tools/environment_install/install-prereqs-ubuntu.sh -y
+
+      - name: Build ArduCopter for SpeedyBee F405 V4
+        shell: bash
+        run: |
+          set -euxo pipefail
+          source ~/.profile
+          cd ardupilot
+          ./waf configure --board speedybeef4v4
+          ./waf copter
+
+      - name: Collect firmware
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_FULLKNOB.apj
+          if [ -f ardupilot/build/speedybeef4v4/bin/arducopter.hex ]; then
+            cp ardupilot/build/speedybeef4v4/bin/arducopter.hex out/ArduCopter_240b5085_speedybeef4v4_Z40_FULLKNOB.hex
+          fi
+          if [ -f ardupilot/build/speedybeef4v4/bin/arducopter.bin ]; then
+            cp ardupilot/build/speedybeef4v4/bin/arducopter.bin out/ArduCopter_240b5085_speedybeef4v4_Z40_FULLKNOB.bin
+          fi
+          sha256sum out/* > out/SHA256SUMS.txt
+          ls -lah out
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedybeef4v4-z40-fullknob
+          path: out/
+          if-no-files-found: error
