@@ -39,16 +39,16 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # Caddx/Ascent GT Pro Z40 manual, Betaflight example:
-          #   set osd_rcchannels = 7,8,9,10
-          # Betaflight uses zero-based indexes here, so the four RC slots are
-          # physical CH8, CH9, CH10, CH11.  Each is rendered as -1000..+1000.
-          # We emulate the same OSD_RC_CHANNELS DisplayPort element in ArduPilot.
+          # Caddx/Ascent GT Pro Z40 uses Betaflight OSD RC slots, not ordinary MSP_RC.
+          # Betaflight renders each slot as a 5-character value in -1000..+1000.
+          # For this first compatibility test, copy physical CH9 into all four slots.
+          # That removes any ambiguity between the manual's Slot0/Slot1 naming and
+          # the Caddx PC Tool channel labels. Once confirmed, slots can be separated.
 
           backend = Path('libraries/AP_MSP/AP_MSP_Telem_Backend.cpp')
           s = backend.read_text()
           old = '''        osd_config.items_position[i] = pos;\n    }\n    // Post flight statistics\n'''
-          new = '''        osd_config.items_position[i] = pos;\n    }\n\n#if AP_RC_CHANNEL_ENABLED\n    // Advertise OSD_RC_CHANNELS as a visible 4-row Betaflight-style element.\n    // Test position: x=25, y=15 on the 53x20 HD canvas.\n    // MSP_OSD_START (2048) is profile-1 visibility flag.\n    osd_config.items_position[OSD_RC_CHANNELS] = MSP_OSD_START + 25 + 15 * MSP_OSD_STEP_Y;\n#endif\n\n    // Post flight statistics\n'''
+          new = '''        osd_config.items_position[i] = pos;\n    }\n\n#if AP_RC_CHANNEL_ENABLED\n    // Advertise OSD_RC_CHANNELS as a visible 4-row Betaflight-style element.\n    // Test position: x=25, y=15 on the 53x20 HD canvas.\n    osd_config.items_position[OSD_RC_CHANNELS] = MSP_OSD_START + 25 + 15 * MSP_OSD_STEP_Y;\n#endif\n\n    // Post flight statistics\n'''
           if old not in s:
               raise SystemExit('OSD config patch point not found')
           backend.write_text(s.replace(old, new, 1))
@@ -64,7 +64,7 @@ jobs:
 
           old_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
 
-          new_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n#if AP_RC_CHANNEL_ENABLED\n    // Exact Betaflight-style four RC slots for the Z40 manual example:\n    // Slot0=CH8, Slot1=CH9, Slot2=CH10, Slot3=CH11.\n    // Betaflight osdElementRcChannels() maps PWM 1000..2000 to -1000..+1000\n    // and sends each slot as a width-5 decimal string on four consecutive rows.\n    RC_Channels *rc_channels = RC_Channels::get_singleton();\n    if (rc_channels != nullptr) {\n        uint16_t pwm[16] {};\n        const uint8_t count = rc_channels->get_radio_in(pwm, 16);\n        static const uint8_t source_index[4] = {7, 8, 9, 10};\n\n        for (uint8_t slot = 0; slot < 4; slot++) {\n            int32_t value = 0;\n            const uint8_t idx = source_index[slot];\n            if (count > idx) {\n                int32_t in = pwm[idx];\n                if (in < 1000) {\n                    in = 1000;\n                } else if (in > 2000) {\n                    in = 2000;\n                }\n                value = (in - 1500) * 2;\n            }\n\n            char text[6];\n            snprintf(text, sizeof(text), "%5ld", (long)value);\n            _displayport->msp_displayport_write_string(25, 15 + slot, false, text);\n        }\n    }\n#endif\n\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
+          new_flush = '''void AP_OSD_MSP_DisplayPort::flush(void)\n{\n#if AP_RC_CHANNEL_ENABLED\n    // Betaflight-compatible OSD_RC_CHANNELS data for Z40.\n    // CH9 is copied into all four RC slots for the first test so either\n    // Slot0-based firmware or the PC Tool's CH9 selection sees the same knob.\n    RC_Channels *rc_channels = RC_Channels::get_singleton();\n    if (rc_channels != nullptr) {\n        uint16_t pwm[16] {};\n        const uint8_t count = rc_channels->get_radio_in(pwm, 16);\n        const uint8_t idx = 8; // zero-based physical CH9\n\n        int32_t value = 0;\n        if (count > idx) {\n            int32_t in = pwm[idx];\n            if (in < 1000) {\n                in = 1000;\n            } else if (in > 2000) {\n                in = 2000;\n            }\n            value = (in - 1500) * 2;\n        }\n\n        char text[6];\n        snprintf(text, sizeof(text), "%5ld", (long)value);\n        for (uint8_t slot = 0; slot < 4; slot++) {\n            _displayport->msp_displayport_write_string(25, 15 + slot, false, text);\n        }\n    }\n#endif\n\n    // grab the screen and force a redraw\n    _displayport->msp_displayport_grab();\n    _displayport->msp_displayport_draw_screen();\n\n    // ok done processing displayport data\n    // let's process incoming MSP frames (and reply if needed)\n    _displayport->process_incoming_data();\n}\n'''
 
           if old_flush not in s:
               raise SystemExit('DisplayPort flush patch point not found')
@@ -95,9 +95,9 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p out
-          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_BFSLOTS.apj
+          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_BFSLOTS_CH9TEST.apj
           if [ -f ardupilot/build/speedybeef4v4/bin/arducopter.bin ]; then
-            cp ardupilot/build/speedybeef4v4/bin/arducopter.bin out/ArduCopter_240b5085_speedybeef4v4_Z40_BFSLOTS.bin
+            cp ardupilot/build/speedybeef4v4/bin/arducopter.bin out/ArduCopter_240b5085_speedybeef4v4_Z40_BFSLOTS_CH9TEST.bin
           fi
           sha256sum out/* > out/SHA256SUMS.txt
           ls -lah out
@@ -105,6 +105,6 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: speedybeef4v4-z40-bfslots
+          name: speedybeef4v4-z40-bfslots-ch9test
           path: out/
           if-no-files-found: error
