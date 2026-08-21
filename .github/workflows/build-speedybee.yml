@@ -1,0 +1,65 @@
+name: Build SpeedyBee F405 V4 MSP RC16
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-speedybee.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout workspace
+        uses: actions/checkout@v4
+
+      - name: Checkout ArduPilot exact commit
+        run: |
+          git clone https://github.com/ArduPilot/ardupilot.git
+          cd ardupilot
+          git checkout 240b5085
+          git submodule update --init --recursive
+
+      - name: Install build prerequisites
+        run: |
+          cd ardupilot
+          Tools/environment_install/install-prereqs-ubuntu.sh -y
+
+      - name: Patch MSP RC output to include CH5-CH16
+        shell: bash
+        run: |
+          cd ardupilot
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('libraries/AP_MSP/AP_MSP_Telem_Backend.cpp')
+          s = p.read_text()
+          old = '''MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)\n{\n    float roll = rc().get_roll_channel().norm_input_dz();\n    float pitch = -rc().get_pitch_channel().norm_input_dz();\n    float yaw = rc().get_yaw_channel().norm_input_dz();\n    float throttle = rc().get_throttle_channel().norm_input_dz();\n\n    const struct PACKED {\n        uint16_t a;\n        uint16_t e;\n        uint16_t r;\n        uint16_t t;\n    } rc {\n        // send only 4 channels, MSP order is AERT\n        a : uint16_t(roll*500+1500),       // A\n        e : uint16_t(pitch*500+1500),      // E\n        r : uint16_t(yaw*500+1500),        // R\n        t : uint16_t(throttle*1000+1000)    // T\n    };\n\n    sbuf_write_data(dst, &rc, sizeof(rc));\n    return MSP_RESULT_ACK;\n}\n'''
+          new = '''MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)\n{\n    float roll = rc().get_roll_channel().norm_input_dz();\n    float pitch = -rc().get_pitch_channel().norm_input_dz();\n    float yaw = rc().get_yaw_channel().norm_input_dz();\n    float throttle = rc().get_throttle_channel().norm_input_dz();\n\n    uint16_t channels[16] {};\n    uint8_t channel_count = rc().get_radio_in(channels, 16);\n\n    // Keep the first four channels exactly in MSP AERT order.\n    channels[0] = uint16_t(roll*500+1500);\n    channels[1] = uint16_t(pitch*500+1500);\n    channels[2] = uint16_t(yaw*500+1500);\n    channels[3] = uint16_t(throttle*1000+1000);\n\n    if (channel_count < 4) {\n        channel_count = 4;\n    }\n\n    sbuf_write_data(dst, channels, channel_count * sizeof(channels[0]));\n    return MSP_RESULT_ACK;\n}\n'''
+          if old not in s:
+              raise SystemExit('Expected MSP RC function not found; refusing to patch wrong source')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff -- libraries/AP_MSP/AP_MSP_Telem_Backend.cpp
+
+      - name: Build ArduCopter
+        shell: bash
+        run: |
+          cd ardupilot
+          source ~/.profile
+          ./waf configure --board speedybeef4v4
+          ./waf copter
+
+      - name: Collect firmware
+        run: |
+          mkdir -p out
+          cp ardupilot/build/speedybeef4v4/bin/arducopter.apj out/ArduCopter_240b5085_speedybeef4v4_Z40_RC16.apj
+          cp ardupilot/build/speedybeef4v4/bin/arducopter.hex out/ArduCopter_240b5085_speedybeef4v4_Z40_RC16.hex
+          sha256sum out/* > out/SHA256SUMS.txt
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedybeef4v4-z40-rc16
+          path: out/
+          if-no-files-found: error
